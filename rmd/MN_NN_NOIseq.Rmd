@@ -1,0 +1,318 @@
+---
+title: "MN_NN_NOIseq"
+author: "Verda Agan"
+date: "5/6/2022"
+output:
+  pdf_document: default
+  html_document: default
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+```
+
+## R Markdown
+
+This is an R Markdown document. Markdown is a simple formatting syntax for authoring HTML, PDF, and MS Word documents. For more details on using R Markdown see <http://rmarkdown.rstudio.com>.
+
+When you click the **Knit** button a document will be generated that includes both content as well as the output of any embedded R code chunks within the document. You can embed an R code chunk like this:
+
+```{r, results='hide', message=FALSE, warning=FALSE}
+library(Matrix)
+library(NOISeq)
+library(tidyr)
+library(biomaRt)
+library(tidyverse)
+```
+
+### NOISeq package consists of three modules: 
+1. Quality
+2. Normalization and low-count filtering;
+3. Differential expression analysis
+
+**We have QC samples from MCF7 and HeLA cells, totaling 6 samples sequenced over 3 batches (Pax 1, 2 & 3). 1 sample from each cell line was sequenced over 3 batches, so we have 3 biological replicates for MCF7 and HeLA. We have 132 whole-blood RNA-sequencing data from multiple sclerosis (MS) and neuromyelitis optica spectrum disorder (NMO) patients. Within the name of each sample, it will have a target label: MN = MS naive; NN = NMO naive. We have 80 MS samples and 52 NMO samples. The goal of this analysis is to perform 1) quality control of count data, 2) normalization, low-count filtering and batch effect correction, and finally 3) differential expression on these samples.** 
+
+
+## Getting Started 
+```{r Getting Started, echo=TRUE}
+### Batch key 
+batch_key <- read_csv(file = "220428_Q-BatchEffects_BatchKey.csv", col_names = TRUE)
+batch_key_mn_nn <- batch_key %>% dplyr::filter(TestLabel == "MS1-MS/NMO")
+#80 MS samples 
+batch_key_mn_nn %>% dplyr::filter(str_detect(SampleColName, 'MN')) %>% nrow()
+#52 NMO samples 
+batch_key_mn_nn %>% dplyr::filter(str_detect(SampleColName, 'NN')) %>% nrow()
+
+#add 'ID' column where SampleColName + Batch# are combined 
+batch_key_mn_nn$'id' <- paste(batch_key_mn_nn$SampleColName, batch_key_mn_nn$Batch, sep="")
+
+#Remove all before and up to last "_", leaving disease type, MN or NN 
+batch_key_mn_nn$id <- gsub(".*_","",as.character(batch_key_mn_nn$id))
+
+### Expression data: featureCounts matrix 
+#The expression data can be both read counts or normalized expression data such as RPKM values, and also any other normalized expression values
+#In this case, they are raw read counts and haven't been normalized (yet)
+counts_table <- read_csv(file = "220428_Q-MS1-Pax2-3_132_Ev104SEv104Cf_Combined-FeatureCounts.csv", col_names = TRUE)
+
+head(counts_table)
+str(counts_table)
+
+### Factors
+#Factors are the variables indicating the experimental group for each sample. With this data, the factor "Disease" has 2 levels: "MS" and "NMO". The factor “Run” has two levels: “R2” and “R3”. The factor “DiseaseRun ”combines the sequencing run with the tissue and hence has four levels: “MS_2”, “MS_3”, “NMO_2” and “NMO_3”. 
+
+factors <- batch_key_mn_nn
+#Remove all before and up to last "_", leaving disease type, MN or NN 
+factors$'SampleColName' <- gsub(".*_","",as.character(factors$SampleColName))
+#Create a new column called Disease Run (Disease + _ + Batch)
+factors$'DiseaseRun' <- paste(factors$SampleColName, "_", factors$Batch)
+#Format 'Batch' column values
+factors$'Batch' <- paste("R", factors$Batch, sep="")
+#Select only SampleColName, Disease Run, and Batch 
+factors <- factors %>% dplyr::select(-c("TestLabel"))
+#Set new column names and re-order
+factors <- factors %>% dplyr::select("SampleColName", "DiseaseRun", "Batch")
+colnames(factors) <- c("Disease", "DiseaseRun", "Run")
+#Remove white space in Disease Run
+factors$'DiseaseRun' <- gsub(" ","",as.character(factors$'DiseaseRun'))
+
+head(factors)
+str(factors)
+
+# factors2 <- factors
+# factors2$DiseaseRun <- gsub("_","",as.character(factors2$DiseaseRun))
+# factors3 <- factors
+# factors3$SampleColName <- gsub(".*_","",as.character(factors3$SampleColName))
+# factors3$Batch <- paste("R", factors3$Batch, sep="")
+# factors3 <- factors3 %>% dplyr::select(-c("TestLabel"))
+
+myfactors <- factors
+# myfactors <- myfactors %>% dplyr::select(Disease, DiseaseRun, Run)
+# colnames(myfactors) <- c("Disease", "Run", "DiseaseRun")
+
+
+### Additional biological annotation
+#Some of the exploratory plots in NOISeq package require additional biological information such as feature length, GC content, biological classification of features, or chromosome position. Ensembl Biomart data base provides these annotations for a wide range of species: biotypes (the biological classification of the features), GC content, or chromosome position. The latter can be used to estimate the length of the feature. However, it is more accurate computing the length from the GTF or GFF annotation file so the introns are not considered.
+
+
+#Ensembl uses the most recently updated human genome housed at the GRC, which is the current major assembly release: GRCh38
+#UThe "listEnsemblArchives" function allows you to view available versions 
+listEnsemblArchives()
+
+#Connect to the Ensembl live gene mart human dataset (GRCh38)
+#'ensembl' data object is hg38,v106
+ensembl = useEnsembl(biomart="ensembl", dataset="hsapiens_gene_ensembl")
+
+
+#The "listAttributes" function will give you the list of the available attributes for a given mart and species
+# View(listFilters(ensembl))
+
+pages = attributePages(ensembl)
+View(listAttributes(ensembl, page="feature_page"))
+
+#applicable to hg38/v106
+hg38_genes <- getBM(attributes=c('ensembl_gene_id','ensembl_gene_id_version','ensembl_transcript_id',
+                                 'ensembl_transcript_id_version', 'hgnc_symbol','description',
+                                 'chromosome_name','start_position','end_position', 'gene_biotype',
+                                 'transcript_biotype', 'transcript_start', 'transcript_end', 'transcript_length',
+                                 'percentage_gene_gc_content'), mart = ensembl) 
+hg38_genes$'gene_length' <- (hg38_genes$end_position - hg38_genes$start_position) + 1
+
+bio_annotation_hg38 <- hg38_genes %>% dplyr::select('ensembl_gene_id', 'percentage_gene_gc_content', 'transcript_biotype', 'transcript_length')
+
+#hg38/v104 
+ensembl_hg38_v104 = useEnsembl(biomart="ensembl", dataset="hsapiens_gene_ensembl", version=104)
+#'start_position" is gene start position; 'end_position' is gene end position 
+hg38_genes_v104 <- getBM(attributes=c('ensembl_gene_id','ensembl_gene_id_version','ensembl_transcript_id',
+                                 'ensembl_transcript_id_version', 'hgnc_symbol','description',
+                                 'chromosome_name','start_position','end_position', 'gene_biotype',
+                                 'transcript_biotype', 'transcript_start', 'transcript_end', 'transcript_length',
+                                 'percentage_gene_gc_content'), mart = ensembl_hg38_v104) 
+hg38_genes_v104$'gene_length' <- (hg38_genes_v104$end_position - hg38_genes_v104$start_position) + 1
+bio_annotation_hg38_v104 <- hg38_genes_v104 %>% dplyr::select('ensembl_gene_id', 'percentage_gene_gc_content', 'chromosome_name', 'start_position', 'end_position', 'gene_biotype', 'transcript_biotype', 'transcript_length')
+bio_annotation_hg38_v104$start_position <- as.character(bio_annotation_hg38_v104$start_position)
+bio_annotation_hg38_v104$end_position <- as.character(bio_annotation_hg38_v104$end_position)
+bio_annotation_hg38_v104$'locus' <- paste(bio_annotation_hg38_v104$'chromosome_name', bio_annotation_hg38_v104$'start_position', bio_annotation_hg38_v104$'end_position', sep="-") 
+bio_annotation_hg38_v104$'locus' <- sub("-", ":", bio_annotation_hg38_v104$'locus') 
+nrow(bio_annotation_hg38_v104) #258752
+
+bio_annotation_hg38_v104_version2 <- hg38_genes_v104 %>% dplyr::select('ensembl_gene_id','chromosome_name', 'start_position', 'end_position', 'gene_biotype', 'gene_length', 'percentage_gene_gc_content', 'ensembl_transcript_id', 'transcript_start', 'transcript_end', 'transcript_length', 'transcript_biotype')
+bio_annotation_hg38_v104_version2$'locus' <- paste(bio_annotation_hg38_v104_version2$'chromosome_name', bio_annotation_hg38_v104_version2$'start_position', bio_annotation_hg38_v104_version2$'end_position', sep="-") 
+bio_annotation_hg38_v104_version2$'locus' <- sub("-", ":", bio_annotation_hg38_v104_version2$'locus') 
+write_tsv(bio_annotation_hg38_v104_version2, file = "bio_annotation_hg38_v104_version2.tsv", col_names = TRUE)
+
+#merge with gene_ids so we can have bio annotations and gene_ids altogether in one df 
+gene_ids <- counts_table %>% dplyr::select(gene_id, locus)
+nrow(gene_ids) #60650
+write_tsv(gene_ids, file = "gene_ids.tsv", col_names = TRUE)
+gene_ids$'id' <- paste(gene_ids$gene_id, "_", gene_ids$locus)
+gene_ids$id <- sub(" ", "", gene_ids$id) 
+
+#merge: Right outer join or right join:
+gene_ids_merge_bio_annotation_hg38_v104 <- merge(x = gene_ids, y = bio_annotation_hg38_v104, by = "locus", all = FALSE)
+write_tsv(gene_ids_merge_bio_annotation_hg38_v104, file = "gene_ids_merge_bio_annotation_hg38_v104.tsv", col_names = TRUE)
+
+#de-duplicate 
+#67128 total joins listed in bio_annotation_hg38_v104_version3 when duplicates remove due to multiple transcript_ids per gene (i.e., isoforms)
+bio_annotation_hg38_v104_version3 <- bio_annotation_hg38_v104_version2 %>% dplyr::select(-c('ensembl_transcript_id', 'transcript_start', 'transcript_end', 'transcript_length', 'transcript_biotype'))
+bio_annotation_hg38_v104_version4 <- bio_annotation_hg38_v104_version3[!duplicated(bio_annotation_hg38_v104_version3$ensembl_gene_id), ]
+write_tsv(bio_annotation_hg38_v104_version4, file = "bio_annotation_hg38_v104_version4.tsv", col_names = TRUE) #67128
+bio_annotation_hg38_v104_version4$'id' <- paste(bio_annotation_hg38_v104_version4$ensembl_gene_id, "_", bio_annotation_hg38_v104_version4$locus)
+bio_annotation_hg38_v104_version4$id<- sub(" ", "", bio_annotation_hg38_v104_version4$id) 
+
+#merge: Right outer join or right join
+gene_ids_merge_bio_annotation_hg38_v104_version4 <- merge(x = bio_annotation_hg38_v104_version4, y = gene_ids, by = "id", all = FALSE)
+gene_ids_merge_bio_annotation_hg38_v104_version4 <- gene_ids_merge_bio_annotation_hg38_v104_version4 %>% dplyr::select(-c("id", "locus.x", "locus.y"))
+gene_ids_merge_bio_annotation_hg38_v104_version4 <- gene_ids_merge_bio_annotation_hg38_v104_version4 %>% dplyr::select(-c("gene_id"))
+write_tsv(gene_ids_merge_bio_annotation_hg38_v104_version4, file = "bio_annotation_ms_nn.tsv", col_names = TRUE)
+
+##For each category of biological annotation, make it its own DF
+
+columns_vector <- c("gene_length", "percentage_gene_gc_content", "gene_biotype")
+gene_length <- gene_ids_merge_bio_annotation_hg38_v104_version4 %>% dplyr::select(ensembl_gene_id, columns_vector[[1]])
+gene_gc_content <- gene_ids_merge_bio_annotation_hg38_v104_version4 %>% dplyr::select(ensembl_gene_id, columns_vector[[2]])
+gene_biotype <- gene_ids_merge_bio_annotation_hg38_v104_version4 %>% dplyr::select(ensembl_gene_id, columns_vector[[3]])
+
+#gene chromosomal coordinates
+gene_chr_coordinates <- gene_ids_merge_bio_annotation_hg38_v104_version4 %>% dplyr::select(ensembl_gene_id, chromosome_name, start_position, end_position)
+rownames(gene_chr_coordinates) <- gene_chr_coordinates$ensembl_gene_id
+gene_chr_coordinates <- gene_chr_coordinates %>% dplyr::select(-c("ensembl_gene_id"))
+mychroms <- gene_chr_coordinates
+names(mychroms) <- c("Chromosome", "GeneStart", "GeneEnd")
+
+#gene length
+mylength <- as.character(gene_length$gene_length)
+str(mylength)
+mylength <- as.numeric(mylength)
+names(mylength) <- gene_length$ensembl_gene_id
+
+#gene gc content
+mygc <- as.character(gene_gc_content$percentage_gene_gc_content)
+str(mygc)
+mygc <- as.numeric(mygc)
+names(mygc) <- gene_gc_content$ensembl_gene_id
+
+#gene biotypes
+mybiotypes <- as.character(gene_biotype$gene_biotype)
+names(mybiotypes) <-gene_biotype$ensembl_gene_id
+str(mybiotypes)
+
+#order samples in the counts table according to the other they are listed in the batch_key_mn_nn DF 
+counts_matrix <- counts_table %>% dplyr::select(gene_id, locus, batch_key_mn_nn$SampleColName)
+counts_matrix_gene_id_locus <- counts_matrix %>% dplyr::select(gene_id, locus)
+
+counts_matrix <- counts_matrix %>% dplyr::select(-c(gene_id,locus))
+rownames(counts_matrix) <- counts_matrix_gene_id_locus$gene_id
+mycounts <- counts_matrix
+
+#reorder Ensembl gene IDs according to the order they are listed in mylength, mygc, and mybiotypes
+mycounts$'gene_id' <- rownames(mycounts)
+#check to see if re-ordering works...it does!
+mycounts[ order(match(mycounts$gene_id, gene_biotype$ensembl_gene_id)), ] %>% dplyr::select(gene_id)
+mycounts <- mycounts[ order(match(mycounts$gene_id, gene_biotype$ensembl_gene_id)), ] 
+head(mycounts$gene_id)
+#assign gene order to an R object
+gene_order <- mycounts %>% dplyr::select(gene_id)
+#remove gene_id column
+mycounts <- mycounts %>% dplyr::select(-c(gene_id))
+rownames(mycounts) <- gene_order$gene_id
+head(rownames(mycounts))
+
+#check again to see if the order of Ensembl gene IDs matches across mycounts, mylength, mychroms, mygc and mybiotypes
+noiseq_data_object_components <- list(mycounts, mylength, mygc, mybiotypes, mychroms, myfactors)
+names(noiseq_data_object_components) <- c("mycounts", "mylength", "mygc", "mybiotypes", "mychroms", "myfactors")
+Names <- c("mycounts", "mylength", "mygc", "mybiotypes", "mychroms", "myfactors")
+head(mylength)
+head(mygc)
+head(mybiotypes)
+head(mychroms)
+
+#write to file
+vectors=list(mylength, mygc, mybiotypes)
+Names2 <- c("mylength", "mygc", "mybiotypes")
+names(vectors) <- Names2 
+for (i in seq_along(vectors)){
+  print(Names2[[i]])
+  write.table(vectors[[i]], paste0(Names2[[i]], (".txt")), row.names = TRUE, col.names = FALSE)
+}
+
+dfs=list(mycounts, mychroms, myfactors)
+Names3 <- c("mycounts", "mychroms", "myfactors")
+names(dfs) <- Names3 
+for (i in seq_along(dfs)){
+  print(Names3[[i]])
+  write.table(dfs[[i]], paste0(Names3[[i]], (".txt")), col.names = TRUE, row.names = TRUE, sep = "\t", quote = FALSE)
+}
+
+##Converting data into a NOISeq object
+mydata <- readData(data = mycounts, length = mylength, gc = mygc, biotype = mybiotypes, chromosome = mychroms, factors = myfactors)
+mydata 
+str(mydata)
+head(assayData(mydata)$exprs)
+head(pData(mydata))
+head(featureData(mydata)@data)
+```
+
+## Quality control of count data
+
+**To generate any of these plots, first of all, the dat function must be applied on the input data (NOISeq object) to obtain the information to be plotted. The user must specify the type of plot the data are to be computed for (argument type). Once the data for the plot have been generated with dat function, the plot will be drawn with the explo.plot function. Therefore, for the quality control plots, we will always proceed as follows:**
+ 
+*Remember:
++ MN = MS (multiple sclerosis) naive
++ NN = NMO (neuromyelitis optica spectrum disorder) naive 
+
+```{QC, echo=TRUE}
+
+##Biotype detection: Which kind of features are being detected? Is there any abnormal contamination in the data? Did I choose an appropriate protocol?
+
+#In this function, parameter k refers to the minimum number of counts required for the gene to be counted as detected. When `factor = NULL` these are calculated for each sample. If instead factor = a string that matches the name of one of your columns in your `myfactors` object, the samples and data within that condition are aggregated. Try `factor = "Disease"`
+#When factor is specified, the calculations are done for each experimental condition, MS and NMO. Samples within the same condition are summed up ("biodetection") or averaged and normalized by sequencing depth ("countsbio","GCbias" and "lengthbias")
+
+mybiodetection <- dat(mydata, k = 0, type = "biodetection", factor = "Disease")
+
+#Convert into user-friendly format 
+biodetct_user_friendly <- dat2save(mybiodetection)
+
+#Generating the corresponding plot
+#This figure shows the biodetection plot per experimental condition. In this case, our condition is disease and we have 2 diseases - MS and NMO
+#The gray bar corresponds to the percentage of each biotype in the genome (i.e. in the whole set of features provided), the stripped color bar is the proportion detected in each disease (with number of counts higher than k), and the solid color bar is the percentage of each biotype within the sample. The vertical green line separates the most abundant biotypes (in the left-hand side, corresponding to the left axis scale) from the rest (in the right-hand side, corresponding to the right axis scale)
+
+pdf("biotype_feature_distribution_per_condition.pdf", width = 30, height = 12)
+par(mfrow = c(1, 2))
+explo.plot(mybiodetection)
+dev.off()
+
+#two plots here
+#the left represents the percentage of each biotype in the genome being detected in the sample, and other the relative abundance of each biotype within the sample
+pdf("biotype_feature_distribution_comparison_across_condiitions.pdf", width = 30, height = 12)
+par(mfrow = c(1, 2))
+explo.plot(mybiodetection, toplot = "protein_coding", plottype = "comparison")
+dev.off()
+
+par(mfrow = c(1, 2))
+explo.plot(mybiodetection, toplot = "lncRNA", plottype = "comparison")
+
+#Count distribution per biotype
+mycountsbio <- dat(mydata, factor = "Disease", type = "countsbio")
+
+#Generating the corresponding "countsbio" plots
+#"countsbio" plot per biotype allows to see how the counts are distributed within each group
+#In the upper side of the plot, the number of detected features that will be represented in the boxplots is displayed
+#Count distribution per biotype in one of the samples (for genes with more than 0 counts)
+pdf("expression_values_distribution_per_biotype_for_MN.pdf", width = 15, height = 10)
+explo.plot(mycountsbio, samples = 1, toplot = 1, plottype = "boxplot")
+dev.off()
+
+pdf("expression_values_distribution_per_biotype_for_NN.pdf", width = 15, height = 10)
+explo.plot(mycountsbio, samples = 2, toplot = "global", plottype = "boxplot")
+dev.off()
+
+explo.plot(mycountsbio, toplot = "global", plottype = "boxplot")
+
+#Just learned that all QC plots described in the tutorial can be generated with QCreport 
+#This will be done next time...
+QCreport(mydata, samples = NULL, factor = "Disease", norm = FALSE)
+
+
+```
+
+Note that the `echo = FALSE` parameter was added to the code chunk to prevent printing of the R code that generated the plot.
