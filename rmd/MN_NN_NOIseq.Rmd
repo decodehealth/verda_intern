@@ -3,39 +3,40 @@ title: "MN_NN_NOIseq"
 author: "Verda Agan"
 date: "5/6/2022"
 output:
-  pdf_document: default
   html_document: default
+  pdf_document: default
 ---
 
-```{r setup, include=FALSE}
+```{r Setup, include=FALSE}
 knitr::opts_chunk$set(echo = TRUE)
 ```
 
-## R Markdown
-
-This is an R Markdown document. Markdown is a simple formatting syntax for authoring HTML, PDF, and MS Word documents. For more details on using R Markdown see <http://rmarkdown.rstudio.com>.
-
-When you click the **Knit** button a document will be generated that includes both content as well as the output of any embedded R code chunks within the document. You can embed an R code chunk like this:
-
-```{r, results='hide', message=FALSE, warning=FALSE}
+```{r Libraries, results='hide', message=FALSE, warning=FALSE}
 library(Matrix)
 library(NOISeq)
 library(tidyr)
 library(biomaRt)
 library(tidyverse)
 ```
+ 
+> Sources: https://www.bioconductor.org/packages/devel/bioc/vignettes/NOISeq/inst/doc/NOISeq.pdf
 
-### NOISeq package consists of three modules: 
-1. Quality
-2. Normalization and low-count filtering;
-3. Differential expression analysis
+### Introduction 
+**NOISeq package consists of three modules:** 
++ 1. Quality
++ 2. Normalization and low-count filtering;
++ 3. Differential expression analysis
 
 **We have QC samples from MCF7 and HeLA cells, totaling 6 samples sequenced over 3 batches (Pax 1, 2 & 3). 1 sample from each cell line was sequenced over 3 batches, so we have 3 biological replicates for MCF7 and HeLA. We have 132 whole-blood RNA-sequencing data from multiple sclerosis (MS) and neuromyelitis optica spectrum disorder (NMO) patients. Within the name of each sample, it will have a target label: MN = MS naive; NN = NMO naive. We have 80 MS samples and 52 NMO samples. The goal of this analysis is to perform 1) quality control of count data, 2) normalization, low-count filtering and batch effect correction, and finally 3) differential expression on these samples.** 
 
+**Note that NOISeq has separate functions for performing normalization, batch effect correction, and removing low-counts, which have run and outlined here. You can decide to do each of these steps yourself (outlined in chunks 5-7), then run DE analysis. Another option (which is much easier) is to use the wrapper functions they have created, called noiseq and noiseqbio, which normalize and remove low-counts features for you. If you have corrected for batch BEFOREHAND (which you should), then your input into either of these functions will have norm set to "n," meaning it's been normalized already in the batch effect correction step. So, after the QC step (chunk 4), do batch effect correction (chunk 7), then call DE genes (chunk 8).** 
+
+**Here, we use the noiseqbio wrapper function, because we have biological replicates available. In the case that we don't have biological replicates, and just technical replicates, then use noiseq with replicates paramater set to "technical." The normalization method you use here should probably be rpkm. In the case that you don't have tech replicates, then replicates parameter is set to "no".**
 
 ## Getting Started 
-```{r Getting Started, echo=TRUE}
-### Batch key 
+
+```{r Getting started, echo=TRUE, warning=FALSE}
+### Creating batch key 
 batch_key <- read_csv(file = "220428_Q-BatchEffects_BatchKey.csv", col_names = TRUE)
 batch_key_mn_nn <- batch_key %>% dplyr::filter(TestLabel == "MS1-MS/NMO")
 #80 MS samples 
@@ -49,7 +50,7 @@ batch_key_mn_nn$'id' <- paste(batch_key_mn_nn$SampleColName, batch_key_mn_nn$Bat
 #Remove all before and up to last "_", leaving disease type, MN or NN 
 batch_key_mn_nn$id <- gsub(".*_","",as.character(batch_key_mn_nn$id))
 
-### Expression data: featureCounts matrix 
+### Loading in expression data: featureCounts matrix 
 #The expression data can be both read counts or normalized expression data such as RPKM values, and also any other normalized expression values
 #In this case, they are raw read counts and haven't been normalized (yet)
 counts_table <- read_csv(file = "220428_Q-MS1-Pax2-3_132_Ev104SEv104Cf_Combined-FeatureCounts.csv", col_names = TRUE)
@@ -57,7 +58,7 @@ counts_table <- read_csv(file = "220428_Q-MS1-Pax2-3_132_Ev104SEv104Cf_Combined-
 head(counts_table)
 str(counts_table)
 
-### Factors
+### Create factors
 #Factors are the variables indicating the experimental group for each sample. With this data, the factor "Disease" has 2 levels: "MS" and "NMO". The factor “Run” has two levels: “R2” and “R3”. The factor “DiseaseRun ”combines the sequencing run with the tissue and hence has four levels: “MS_2”, “MS_3”, “NMO_2” and “NMO_3”. 
 
 factors <- batch_key_mn_nn
@@ -78,46 +79,37 @@ factors$'DiseaseRun' <- gsub(" ","",as.character(factors$'DiseaseRun'))
 head(factors)
 str(factors)
 
-# factors2 <- factors
-# factors2$DiseaseRun <- gsub("_","",as.character(factors2$DiseaseRun))
-# factors3 <- factors
-# factors3$SampleColName <- gsub(".*_","",as.character(factors3$SampleColName))
-# factors3$Batch <- paste("R", factors3$Batch, sep="")
-# factors3 <- factors3 %>% dplyr::select(-c("TestLabel"))
-
 myfactors <- factors
-# myfactors <- myfactors %>% dplyr::select(Disease, DiseaseRun, Run)
-# colnames(myfactors) <- c("Disease", "Run", "DiseaseRun")
+myfactors <- myfactors %>% dplyr::select(Disease, DiseaseRun, Run)
+colnames(myfactors) <- c("Disease", "Run", "DiseaseRun")
 
-
-### Additional biological annotation
+### Adding additional biological annotation
 #Some of the exploratory plots in NOISeq package require additional biological information such as feature length, GC content, biological classification of features, or chromosome position. Ensembl Biomart data base provides these annotations for a wide range of species: biotypes (the biological classification of the features), GC content, or chromosome position. The latter can be used to estimate the length of the feature. However, it is more accurate computing the length from the GTF or GFF annotation file so the introns are not considered.
-
+#IMPORTANT Note: MN/NN samples use Ensembl v104 for hg38 genome assembly; Initially, I thought it was the latest version 106. Later confirmed with Lukasz that it is 104 
 
 #Ensembl uses the most recently updated human genome housed at the GRC, which is the current major assembly release: GRCh38
 #UThe "listEnsemblArchives" function allows you to view available versions 
 listEnsemblArchives()
 
-#Connect to the Ensembl live gene mart human dataset (GRCh38)
-#'ensembl' data object is hg38,v106
-ensembl = useEnsembl(biomart="ensembl", dataset="hsapiens_gene_ensembl")
-
-
-#The "listAttributes" function will give you the list of the available attributes for a given mart and species
-# View(listFilters(ensembl))
-
-pages = attributePages(ensembl)
-View(listAttributes(ensembl, page="feature_page"))
-
-#applicable to hg38/v106
-hg38_genes <- getBM(attributes=c('ensembl_gene_id','ensembl_gene_id_version','ensembl_transcript_id',
-                                 'ensembl_transcript_id_version', 'hgnc_symbol','description',
-                                 'chromosome_name','start_position','end_position', 'gene_biotype',
-                                 'transcript_biotype', 'transcript_start', 'transcript_end', 'transcript_length',
-                                 'percentage_gene_gc_content'), mart = ensembl) 
-hg38_genes$'gene_length' <- (hg38_genes$end_position - hg38_genes$start_position) + 1
-
-bio_annotation_hg38 <- hg38_genes %>% dplyr::select('ensembl_gene_id', 'percentage_gene_gc_content', 'transcript_biotype', 'transcript_length')
+# #Connect to the Ensembl live gene mart human dataset (GRCh38)
+# #'ensembl' data object is hg38,v106
+# ensembl = useEnsembl(biomart="ensembl", dataset="hsapiens_gene_ensembl")
+# 
+# #The "listAttributes" function will give you the list of the available attributes for a given mart and species
+# # View(listFilters(ensembl))
+# 
+# pages = attributePages(ensembl)
+# View(listAttributes(ensembl, page="feature_page"))
+# 
+# #applicable to hg38/v106
+# hg38_genes <- getBM(attributes=c('ensembl_gene_id','ensembl_gene_id_version','ensembl_transcript_id',
+#                                  'ensembl_transcript_id_version', 'hgnc_symbol','description',
+#                                  'chromosome_name','start_position','end_position', 'gene_biotype',
+#                                  'transcript_biotype', 'transcript_start', 'transcript_end', 'transcript_length',
+#                                  'percentage_gene_gc_content'), mart = ensembl) 
+# hg38_genes$'gene_length' <- (hg38_genes$end_position - hg38_genes$start_position) + 1
+# 
+# bio_annotation_hg38 <- hg38_genes %>% dplyr::select('ensembl_gene_id', 'percentage_gene_gc_content', 'transcript_biotype', 'transcript_length')
 
 #hg38/v104 
 ensembl_hg38_v104 = useEnsembl(biomart="ensembl", dataset="hsapiens_gene_ensembl", version=104)
@@ -243,12 +235,21 @@ for (i in seq_along(dfs)){
   write.table(dfs[[i]], paste0(Names3[[i]], (".txt")), col.names = TRUE, row.names = TRUE, sep = "\t", quote = FALSE)
 }
 
+```
+
+## Create your NOIseq data object 
+
+```{r Creating a NOIseq data object, echo=TRUE, warning=FALSE}
+
 ##Converting data into a NOISeq object
 mydata <- readData(data = mycounts, length = mylength, gc = mygc, biotype = mybiotypes, chromosome = mychroms, factors = myfactors)
 mydata 
 str(mydata)
+#counts matrix 
 head(assayData(mydata)$exprs)
+#batch key 
 head(pData(mydata))
+#biological annotatio information concatenated (includes gene length, %GC content, gene biotype, and chr coordinates of gene)
 head(featureData(mydata)@data)
 ```
 
@@ -260,10 +261,12 @@ head(featureData(mydata)@data)
 + MN = MS (multiple sclerosis) naive
 + NN = NMO (neuromyelitis optica spectrum disorder) naive 
 
-```{QC, echo=TRUE}
+```{r QC, echo=TRUE, warning=FALSE}
 
+###Generating data for exploratory plots###
 ##Biotype detection: Which kind of features are being detected? Is there any abnormal contamination in the data? Did I choose an appropriate protocol?
 
+##Biotype detection
 #In this function, parameter k refers to the minimum number of counts required for the gene to be counted as detected. When `factor = NULL` these are calculated for each sample. If instead factor = a string that matches the name of one of your columns in your `myfactors` object, the samples and data within that condition are aggregated. Try `factor = "Disease"`
 #When factor is specified, the calculations are done for each experimental condition, MS and NMO. Samples within the same condition are summed up ("biodetection") or averaged and normalized by sequencing depth ("countsbio","GCbias" and "lengthbias")
 
@@ -291,8 +294,11 @@ dev.off()
 par(mfrow = c(1, 2))
 explo.plot(mybiodetection, toplot = "lncRNA", plottype = "comparison")
 
-#Count distribution per biotype
+##Count distribution per biotype
+#data is computed by the "disease" factor 
 mycountsbio <- dat(mydata, factor = "Disease", type = "countsbio")
+#data is computed by no factor...so all samples
+mycountsbio_per_sample <- dat(mydata, factor = NULL, type = "countsbio")
 
 #Generating the corresponding "countsbio" plots
 #"countsbio" plot per biotype allows to see how the counts are distributed within each group
@@ -300,6 +306,8 @@ mycountsbio <- dat(mydata, factor = "Disease", type = "countsbio")
 #Count distribution per biotype in one of the samples (for genes with more than 0 counts)
 pdf("expression_values_distribution_per_biotype_for_MN.pdf", width = 15, height = 10)
 explo.plot(mycountsbio, samples = 1, toplot = 1, plottype = "boxplot")
+explo.plot(mycountsbio_per_sample, samples = 1, toplot = 1, plottype = "boxplot")
+
 dev.off()
 
 pdf("expression_values_distribution_per_biotype_for_NN.pdf", width = 15, height = 10)
@@ -309,10 +317,477 @@ dev.off()
 explo.plot(mycountsbio, toplot = "global", plottype = "boxplot")
 
 #Just learned that all QC plots described in the tutorial can be generated with QCreport 
-#This will be done next time...
-QCreport(mydata, samples = NULL, factor = "Disease", norm = FALSE)
+#Rstudio crashed when I tried to run QCreport
+# QCreport(mydata, samples = NULL, factor = "Disease", norm = FALSE)
 
+
+##Sequencing depth & Expression Quantification 
+#the "saturation" plot shows us the number of features detected with more than "k" counts with the sequencing depth of the samples, and with higher and lower simulating sequencing depths 
+#purpose is to assess if the sequencing depth of the samples is enough to detect the features of interest and to get a good quantification of their expression
+
+mysaturation = dat(mydata, k = 0, ndepth = 7, type = "saturation")
+# head(str(mysaturation))
+#solid point in each line corresponds to the real available sequencing depth
+#so in samples 1 and 2, the sequencing depth of sample 1 is 60 mill reads, and that of sample 2 is 50 mill reads 
+#line values are to be read in the left Y axis and bar values in the right Y axis 
+#so the # of detected features in sample 1 is ~25K while that of sample 2 is ~24K
+pdf("sequencing_depth_global_level_saturation_plot_samples_11001NN_11006NN.pdf", width = 15, height = 10)
+explo.plot(mysaturation, toplot = 1, samples = 1:2, yleftlim = NULL, yrightlim = NULL)
+dev.off()
+
+#can also plot sequencing depth on a global level for up to 12 samples 
+#unable to visualize all 132 samples on these plots 
+pdf("sequencing_depth_global_level_saturation_plot_samples_1_to_12_8NNsamples_4MNsamples.pdf", width = 15, height = 10)
+explo.plot(mysaturation, toplot = 1, samples = 1:12, yleftlim = NULL, yrightlim = NULL)
+dev.off()
+## of protein_coding features detected at the actual sequencing depth as well as higher and lower simulated sequencing depths
+pdf("sequencing_depth_protein_coding_saturation_plot_samples_1_to_12_8NNsamples_4MNsamples.pdf", width = 15, height = 10)
+explo.plot(mysaturation, toplot = "protein_coding", samples = 1:12)
+dev.off()
+
+##Count distribution per sample or per disease condiiton  
+#visualize the count distribution for all the samples, either for all the features or for the features belonging to a certain biological group (biotype)
+pdf("count_distribution_per_sample_for_all_features.pdf", width = 20, height = 10)
+explo.plot(mycountsbio_per_sample, toplot = "global", samples = NULL, plottype = "boxplot")
+dev.off()
+pdf("count_distribution_for_first_12_samples_for_all_features.pdf", width = 15, height = 10)
+explo.plot(mycountsbio_per_sample, toplot = "global", samples = 1:12, plottype = "boxplot")
+dev.off()
+pdf("count_distribution_per_sample_for_protein_coding_lncRNA_processed_pseudogene.pdf", width = 20, height = 10)
+explo.plot(mycountsbio_per_sample, toplot = "protein_coding", samples = NULL, plottype = "boxplot")
+explo.plot(mycountsbio_per_sample, toplot = "lncRNA", samples = NULL, plottype = "boxplot")
+explo.plot(mycountsbio_per_sample, toplot = "processed_pseudogene", samples = NULL, plottype = "boxplot")
+dev.off()
+
+##Sensitivity
+#Features with low counts are, in general, less reliable and may introduce noise in the data that makes more difficult to extract the relevant information, for instance, the differentially expressed features
+#e bars show the percentage of features within each sample having more than 0 counts per million (CPM), or more than 1, 2, 5 and 10 CPM
+#horizontal lines are the corresponding percentage of features with those CPM in at least one of the samples (or experimental conditions if the factor parameter is not NULL)
+#in the upper side of the plot, the sequencing depth of each sample (in million reads) is given
+pdf("sensitivity_plot_CPM_value_proportions_per_disease_condition.pdf", width = 15, height = 10)
+explo.plot(mycountsbio, toplot = 1, samples = NULL, plottype = "barplot")
+dev.off()
+
+pdf("sensitivity_plot_CPM_value_proportions_per_sample.pdf", width = 20, height = 10)
+explo.plot(mycountsbio_per_sample, toplot = 1, samples = NULL, plottype = "barplot")
+dev.off()
+
+pdf("gene_expression_levels_on_global_scale_and_other_biotype_features_per_disease_condition.pdf", width = 15, height = 10)
+explo.plot(mycountsbio, toplot = 2, samples = NULL, plottype = "boxplot")
+explo.plot(mycountsbio, toplot = 3, samples = NULL, plottype = "boxplot")
+explo.plot(mycountsbio, toplot = 4, samples = NULL, plottype = "boxplot")
+dev.off()
+
+##Sequencing bias detection
+#Prior to perform further analyses such as differential expression, it is essential to normalize data to make the samples comparable and remove the effect of technical biases from the expression estimation
+#Read counts for each genomic feature depend heavily on the total number of obtained reads (sequencing depth) and the feature's length, as well as transcriptome and nucleotide composition. You might expect the method to produce a number of reads proportional to the number of cDNA molecules in the sample. The key is the fragmentation step of mRNA molecules, which occurs before reverse transcription of mRNA molecules to cDNA. Since sequencing requires that the molecules are broken down into smaller pieces, longer transcripts will naturally yield a higher number of fragments and, thus, a higher read count
+#The biases that can be studied are: the feature length effect, the GC content and the differences in RNA composition
+
+##Length bias
+#The length bias plot describes the relationship between the feature length and the expression values
+#The length is divided in intervals (bins) containing 200 features and the middle point of each bin is depicted in X axis
+#For each bin, the 5% trimmed mean of the corresponding expression values (CPM if norm=FALSE or values provided if norm=TRUE) is computed and depicted in Y axis
+#A cubic spline regression model is fitted to explain the relationship between length and expression. Both the model p-value and the coefficient of determination (R2) are shown in the plot as well as the fitted regression curve. If the model p-value is significant and R2 value is high (more than 70%), the expression depends on the feature length and the curve shows the type of dependence
+
+#for both models, the model p-value is VERY significant and the R2 value is high (more than 90%), so gene expression depends on the feature length
+#length bias was generated for each disease condition -- MN and NN 
+pdf("length_bias_per_disease_condition_global_and_top_3_biotype_features.pdf", width = 15, height = 10)
+mylengthbias_disease = dat(mydata, factor = "Disease", type = "lengthbias")
+explo.plot(mylengthbias_disease, samples = NULL, toplot = "global")
+explo.plot(mylengthbias_disease, samples = NULL, toplot = "protein_coding")
+explo.plot(mylengthbias_disease, samples = NULL, toplot = "lncRNA")
+explo.plot(mylengthbias_disease, samples = NULL, toplot = "processed_pseudogene")
+dev.off()
+
+show(mylengthbias_disease)
+
+#length bias was generated for each disease-run factor -- MN2, MN3, NN2, and NN3 
+#while NN3 stands apart from MN2, MN3 and NN2, it still has a strong r2 value 
+pdf("length_bias_per_disease_run_factor_global_and_top_3_biotype_features.pdf", width = 15, height = 10)
+mylengthbias_diseaserun = dat(mydata, factor = "DiseaseRun", type = "lengthbias")
+explo.plot(mylengthbias_diseaserun, samples = NULL, toplot = "global")
+explo.plot(mylengthbias_diseaserun, samples = NULL, toplot = "protein_coding")
+explo.plot(mylengthbias_diseaserun, samples = NULL, toplot = "lncRNA")
+explo.plot(mylengthbias_diseaserun, samples = NULL, toplot = "processed_pseudogene")
+dev.off()
+
+show(mylengthbias_diseaserun)
+
+###GC content bias
+#for both models, while the p-value is significant, the R2 value is low(<70%), so gene expression lowly depends on feature GC content 
+pdf("gc_content_bias_per_disease_and_disease_run_basis.pdf", width = 15, height = 10)
+myGCbias_disease = dat(mydata, factor = "Disease", type = "GCbias")
+explo.plot(myGCbias_disease, samples = NULL, toplot = "global")
+# explo.plot(myGCbias_disease, samples = NULL, toplot = "protein_coding")
+# explo.plot(myGCbias_disease, samples = NULL, toplot = "lncRNA")
+
+myGCbias_diseaserun = dat(mydata, factor = "DiseaseRun", type = "GCbias")
+explo.plot(myGCbias_diseaserun, samples = NULL, toplot = "global")
+dev.off()
+
+###RNA composition
+#"Diagnostic test: FAILED. Normalization is required to correct this bias."
+mycd = dat(mydata, type = "cd", norm = FALSE, refColumn = 1)
+pdf("RNA_composition_plot.pdf", width = 15, height = 10)
+explo.plot(mycd, samples = 1:12)
+dev.off()
+
+##PCA
+myPCA = dat(mydata, type = "PCA")
+pdf("pca_plot_colored_by_disease_condition.pdf", width = 15, height = 10)
+explo.plot(myPCA, factor = "Disease")
+dev.off()
+
+pdf("pca_plot_colored_by_run.pdf", width = 15, height = 10)
+explo.plot(myPCA, factor = "Run")
+dev.off()
+
+pdf("pca_plot_colored_by_disease_run.pdf", width = 15, height = 10)
+explo.plot(myPCA, factor = "DiseaseRun")
+dev.off()
+
+PCA <- dat2save(myPCA)
+
+pdf("pca_plot_without_batch_effect_correction_or_normalization_with_scree_plot.pdf", width = 15, height = 10)
+par(mfrow = c(2,2))
+explo.plot(myPCA, factor = "Disease")
+explo.plot(myPCA, factor = "Run")
+explo.plot(myPCA, factor = "DiseaseRun")
+plot(x = myPCAvarexp_10$ID, y = myPCAvarexp_10$prop_varex, xlab = "Principal Component", ylab = "Proportion of Variance Explained", type = "b")
+dev.off()
+
+myPCA_varexp <- as.data.frame(myPCA@dat$result$var.exp)
+myPCA_varexp <- myPCA_datacorr_myPCA_varexp %>% mutate("ID" = row_number())
+colnames(myPCA_varexp) <- c("prop_varex", "unknown", "ID")
+myPCAvarexp_10 <- myPCA_varexp[1:10, ]
 
 ```
 
-Note that the `echo = FALSE` parameter was added to the code chunk to prevent printing of the R code that generated the plot.
+## Normalization 
+
+**We strongly recommend to normalize the counts to correct, at least, sequencing depth bias. The normalization techniques implemented in NOISeq are RPKM, Upper Quartile and TMM, which stands for Trimmed Mean of M value, but the package accepts data normalized with any other method as well as data previously transformed to remove batch effects  or to reduce noise.** 
+
+**The normalization functions (rpkm, tmm and uqua) can be applied to common R matrix and data frame objects.**
+
+**For calculating gene count comparisons between and within samples and for DE analysis, TMM is recommended. TMM assumes that most of the genes are not differentially expressed. It normalizes the total RNA output among the samples and does not consider gene length or library size for normalization.** 
+
+**TMM is a good choice to remove batch effects while comparing samples from different tissues or genotypes. By default, TMM and Upper Quartile do not correct for the length of features (unlike RPKM/FPKM). However, TMM and Upper Quartile functions in NOIseq can integrate length correction is length information is available.**
+
+**TMM conditions for function args:**
++ lc == 0 ---> correction factor for length normalization; this correction is done by dividing the counts vector by (length/1000)^lc; by default, lc == 1 for RPKM and lc == 0 for other methods like TMM
++ k == 0 --> counts in the expression matrix equal to 0 remain 0, unless you assign k to a non-zero value, in which case 'k' replaces zeroes  
++ long == 1000 --> numeric vector containing the length of features (i.e., mylength); when set to 1000, no length correction is applied (no matter the value of parameter lc)
+
+```{r Normalization, echo=TRUE, warning=FALSE}
+
+## TMM normalization with no length correction
+mytmm <- tmm(assayData(mydata)$exprs, long = 1000, lc = 0, k = 0)
+            
+head(mycounts, 5)   
+head(mytmm, 5)
+
+# cpm(assayData(mydata)$exprs)
+```
+
+## Low-count filtering
+**Excluding features with low counts improves, in general, differential expression results, no matter the method being used, since noise in the data is reduced. However, the best procedure to filter these low count features has not been yet decided nor implemented in the differential expression packages. NOISeq includes three methods to filter out features with low counts.**
+
+**Note, in the noiseqbio wrapper function, we use method 1, CPM, for filtering low-counts feature**
+
+```{r Low-count filtering, echo=TRUE, warning=FALSE}
+## Filtering low counts (method 1) --> CPM
+# Filtering out low count features...
+# When NOT TMM normalized...15215 features are to be kept for differential expression analysis with filtering method 1
+myfilt_1 = filtered.data(mycounts, factor = myfactors$Disease, norm = FALSE, depth = NULL, method = 1, cv.cutoff = 100, cpm = 1, p.adj = "fdr")
+# When TMM normalized...22692 features are to be kept for differential expression analysis with filtering method 1
+myfilt_1_tmm_norm = filtered.data(mytmm, factor = myfactors$Disease, norm = TRUE, depth = NULL, method = 1, cv.cutoff = 100, cpm = 1, p.adj = "fdr")
+
+## Filtering low counts (method 2) --> Wilcoxon test
+# Filtering out low count features...
+# When NOT TMM normalized...31937 features are to be kept for differential expression analysis with filtering method 2
+myfilt_2 = filtered.data(mycounts, factor = myfactors$Disease, norm = FALSE, depth = NULL, method = 2, p.adj = "fdr")
+# When TMM normalized...31937 features are to be kept for differential expression analysis with filtering method 2
+myfilt_2_tmm_norm = filtered.data(mytmm, factor = myfactors$Disease, norm = TRUE, depth = NULL, method = 2, p.adj = "fdr")
+
+## Filtering low counts (method 3) --> Proportion test 
+myfilt_3 = filtered.data(mycounts, factor = myfactors$Disease, norm = FALSE, depth = NULL, method = 3, p.adj = "fdr")
+myfilt_3_tmm_norm = filtered.data(tmm, factor = myfactors$Disease, norm = TRUE, depth = NULL, method = 3, p.adj = "fdr")
+```
+
+## Batch effect correction
+
+**When a batch effect is detected in the data or the samples are not properly clustered due to an unknown source of technical noise, it is usually appropriate to remove this batch effect or noise before proceeding with the differential expression analysis.**
+
+**ARSyNseq (ASCA Removal of Systematic Noise for sequencing data) is an R function implemented in NOISeq package that is designed for filtering the noise associated to identified or unidentified batch effects. The ARSyN method combines analysis of variance (ANOVA) modeling and multivariate analysis of estimated effects (PCA) to identify the structured variation of either the effect of the batch (if the batch information is provided) or the ANOVA errors (if the batch information is unknown).**
+
+**Arguments of the ARSyNseq function:**
++ data --> biobase's eSet object created with the readData function (i.e., mydata)
++ factor --> name of the factor (as it was given to the readData function to make mydata) to be used in the ARSyN model (i.e., the factor/column containing the batch information -- 'Run')
++ batch --> TRUE to indicate that the factor argument indicates the batch information 
++ norm --> normalization technique, one of rpkm (default), uqua, tmm or n (if data is already normalized); if length was provided through the readData function (i.e., mylength), the arguments lc and k are set to 1 and 0, respectively 
++ logtransf --> if FALSE, a log-transformation will be applied on the data before computing ARSyN model to improve the results of PCA on count data
+
+**Two ways to run batch effect correction:**
++ (1) When batch is already identified with one of the factors described in the argument factor of the data object (i.e., 'Run' in this case), ARSyNseq estimates this effect and removes it by estimating the main PCs of the ANOVA effects associated. The factor argument is equal to the name of the batch and batch == TRUE 
++ (2) When batch is not identified, the model estimates the effects associated to each factor of interest and analyzes if there exists systematic noise in the residuals. If there is batch effect, it will be identified and removed by estimating the main PCs of these residuals. In such case factor argument can have several factors and batch == FALSE
+
+**ARSyN, a flexible approach for the correction of systematic biases in single omic datasets for both declared (batches) or hidden sources of technical noise.**
+
+**ARSyN versions was first included in the NOISeq R package (Tarazona et al., 2015) and now their functionality has been quite improved in the ARSyNbac function, with simultaneous correction of unwanted effects from both known or unknown sources, performance plots and more flexible options for PCA models.**
+
+**Should the source of unwanted variation be known, the method estimates the batch effect and removes it from data. When the source of batch effect is unknown, the residual noise is analyzed by PCA to detect any systematic component which is subsequently removed from the data. It is also possible to simultaneously correct the data for both types of noise.** 
+
+```{r Batch-effect correction, echo=TRUE, warning=FALSE}
+
+## Removing batch effect when the batch is identified for each sample and exploring results with PCA:
+# batch column is labeled 'Run' in myfactors
+# head(myfactors)
+mydatacorr = ARSyNseq(mydata, factor = "Run", batch = TRUE, norm = "TMM", logtransf = FALSE)
+myPCA_datacorr = dat(mydatacorr, type = "PCA")
+pdf("batch_effect_identified_tmm_normalized_with_scree_plot.pdf", width = 15, height = 10)
+par(mfrow = c(2,2))
+explo.plot(myPCA_datacorr, factor = "Disease")
+explo.plot(myPCA_datacorr, factor = "Run")
+explo.plot(myPCA_datacorr, factor = "DiseaseRun")
+plot(x = myPCA_datacorr_myPCA_varexp_10$ID, y = myPCA_datacorr_myPCA_varexp_10$prop_varex, xlab = "Principal Component", ylab = "Proportion of Variance Explained", type = "b")
+dev.off()
+
+myPCA_datacorr_myPCA_varexp <- as.data.frame(myPCA_datacorr@dat$result$var.exp)
+myPCA_datacorr_myPCA_varexp <- myPCA_datacorr_myPCA_varexp %>% mutate("ID" = row_number())
+colnames(myPCA_datacorr_myPCA_varexp) <- c("prop_varex", "unknown", "ID")
+myPCA_datacorr_myPCA_varexp_10 <- myPCA_datacorr_myPCA_varexp[1:10, ]
+
+###When the batch is identified, its effect is being estimated.###
+###The depicted PCA Plot shows CORRECTED counts data, meaning it has been normalized and batch effect corrected. It appears as if variance across samples is explained by 30% for PC1 and 27% for PC2 in these conditions. The first two principal components explain 57% of the variability across samples. If we plot with more than just PCS1-2, then I am assuming the main source in variability will switch from the BATCH effect to EXPERIMENTAL condition, whereby samples will cluster by condition (???).###
+
+## If we consider that there exists a batch effect but it is not identified (we do not know the batch information):
+mydatacorr2 = ARSyNseq(mydata, factor = "Disease", batch = FALSE, norm = "TMM", logtransf = FALSE)
+myPCA_datacorr2 = dat(mydatacorr2, type = "PCA")
+
+pdf("batch_effect_unknown_tmm_normalized_with_scree_plot.pdf", width = 15, height = 10)
+par(mfrow = c(2,2))
+explo.plot(myPCA_datacorr2, factor = "Disease")
+explo.plot(myPCA_datacorr2, factor = "Run")
+explo.plot(myPCA_datacorr2, factor = "DiseaseRun")
+plot(x = myPCA_datacorr2_myPCA_varexp_10$ID, y = myPCA_datacorr2_myPCA_varexp_10$prop_varex, xlab = "Principal Component", ylab = "Proportion of Variance Explained", type = "b")
+dev.off()
+
+myPCA_datacorr2_myPCA_varexp <- as.data.frame(myPCA_datacorr2@dat$result$var.exp)
+myPCA_datacorr2_myPCA_varexp <- myPCA_datacorr2_myPCA_varexp %>% mutate("ID" = row_number())
+colnames(myPCA_datacorr2_myPCA_varexp) <- c("prop_varex", "unknown", "ID")
+myPCA_datacorr2_myPCA_varexp_10 <- myPCA_datacorr2_myPCA_varexp[1:10, ]
+
+###When the batch is NOT identified, the existence of systematic noise in the residuals is being estimated.###
+###The depicted PCA Plot shows CORRECTED counts data, meaning it has been normalized and unidentified variation has been removed. It appears as if variance across samples is 8% for PC1 and 5% for PC2. The first two principal components explain 13% of the variability across samples.##
+
+# ARSyNbac(mydata, batchEstimation = TRUE, Interaction = FALSE,
+#   Variability = 0.9, beta = 2, modelName = "Model 1",
+#   showplot = TRUE)
+
+# Covariates <- t(pData(mydata))
+# Num.factors <- nrow(Covariates)
+# labels.factors <- rownames(Covariates)
+# Design <- list(NULL,NULL,NULL)
+# for (i in 1:Num.factors){
+#   x <- as.character(Covariates[i,])
+# 		Design[[i]] <- make.ASCA.design(x)
+# 		} 
+# 
+# make.ASCA.design <- function(x)
+# {
+# x<-as.factor(x)
+# levels<-unique(x)
+# n<-length(x)
+# p<-length(levels)
+# 
+# Design<-matrix(0,nrow=n,ncol=p)
+# 
+# for (i in 1:n){
+# 	for (j in 1:p){
+# 	
+# 	if (x[i]==levels[j])
+# 	{
+# 	Design[i,j]=1
+# 	}
+# 	}
+# }
+# colnames(Design)<-levels
+# 
+# output<-Design
+# output
+# }
+
+```
+
+## Differential expression 
+**The NOISeq package computes differential expression between two experimental conditions given the expression level of the considered features. The package includes two non-parametric approaches for differential expression analysis: NOISeq for technical replicates or no replication at all, and NOISeqBIO, which is optimized for the use of biological replicates. Both methods take read counts from RNA-seq as the expression values, in addition to previously normalized data and read counts from other NGS technologies.**
+
+**We will be running NOISeqBIO, which automatically filters low count features (which by default uses the CPM method --> filter=1)**
+
+**NOISeq summarizes biological replicates by adding them up, as opposed to summing.**
+
+**NOISeq computes the following differential expression statistics for each feature: M (which is the log2-ratio of the two conditions) and D (the value of the difference between conditions). Expression levels equal to 0 are replaced with the given constant k > 0, in order to avoid infinite or undetermined M-values. If k = NULL, the 0 is replaced by the midpoint between 0 and the next non-zero value in the expression matrix.**
+
+**A feature is considered to be differentially expressed if its corresponding M and D values are likely to be higher than in noise. Noise distribution is obtained by comparing all pairs of replicates within the same condition.**
+
+```{r Differential expression, echo=TRUE, warning=FALSE}
+
+###Running differential gene expression analysis 
+##Please note that norm = "n" argument should be used in noiseq or noiseqbio whenever the data have been previously normalized or corrected for a batch effect 
+##Our data was normalized and batch effected corrected in the previous section, so set norm = "n"
+##No matter what we set lc to, it doesn't matter in this instance since are data has already been normalized 
+
+# adjust for gene length by setting lc == 1; 0 if you don't want to do length correction 
+# filter == 1 --> CPM method is applied for filtering out low count features before computing differential expression analysis 
+mynoiseqbio <- noiseqbio(mydatacorr, k = 0, norm = "n", factor = "Disease",
+                        lc = 0, r = 20, adj = 1.5, plot = FALSE, a0per = 0.9, random.seed = 12345,
+                        filter = 1)
+# filter == 2 --> Wilcoxon test method
+mynoiseqbio_filt2 <- noiseqbio(mydatacorr, k = 0, norm = "n", factor = "Disease",
+                        lc = 0, r = 20, adj = 1.5, plot = FALSE, a0per = 0.9, random.seed = 12344,
+                        filter = 2)
+
+# filter == 3 --> Proportion test method 
+mynoiseqbio_filt3 <- noiseqbio(mydatacorr, k = 0, norm = "n", factor = "Disease",
+                        lc = 0, r = 20, adj = 1.5, plot = FALSE, a0per = 0.9, random.seed = 12343,
+                        filter = 3)
+```
+
+## Identifying differentially expressed features
+
+**Once we have obtained the differentially expression probability for each one of the features by using NOISeq or NOISeqBIO function, we may want to select the differentially expressed features for a given threshold q. This can be done with degenes function on the "output" object using the parameter q. With the argument M we choose if we want all the differentially expressed features, only the differentially expressed features that are more expressed in condition 1 than in condition 2 (M = "up") or only the differentially expressed features that are under-expressed in condition 1 with regard to condition 2 (M = "down"): 
+
+**When using NOISeqBIO, the probability of differential expression would be equivalent to 1 − FDR, where FDR can be considered as an adjusted p-value. Hence, in this case, it would be more convenient to use q = 0.95.**
+
+```{r Identifying DE genes, echo=TRUE, warning=FALSE}
+
+## q is the value for the probability threshold 
+
+# all differentially expressed genes between MN and NN condition are to be returned 
+# "343 differentially expressed features"
+mynoiseq_all = degenes(mynoiseqbio, q = 0.95, M = NULL)
+mynoiseq_all$'ENSEMBL' <- rownames(mynoiseq_all)
+
+# only differentially expressed genes that are UP in MN versus NN (so down in NN)
+# "27 differentially expressed features (up in first condition)" --> aka MN 
+mynoiseq_up_in_mn_down_in_nn = degenes(mynoiseqbio, q = 0.95, M = "up")
+mynoiseq_up_in_mn_down_in_nn$'ENSEMBL' <- rownames(mynoiseq_up_in_mn_down_in_nn)
+
+# only differentially expressed genes that are DOWN in MN versus NN (so UP in NN)
+# "316 differentially expressed features (down in first condition)" --> aka MN
+mynoiseq_down_in_mn_up_in_nn = degenes(mynoiseqbio, q = 0.95, M = "down")
+mynoiseq_down_in_mn_up_in_nn$'ENSEMBL' <- rownames(mynoiseq_down_in_mn_up_in_nn)
+
+```
+
+## Plots on differential expression results
+
+**Once differential expression has been computed, it is interesting to plot the average expression values of each condition and highlight the features declared as differentially expressed. It can be done with the DE.plot**
+
+```{r Visualizing DE genes, echo=TRUE, warning=FALSE}
+
+## Expression plot 
+# summary plot of the expression values for both conditions (black), differentially expressed genes are highlighted in red 
+DE.plot(mynoiseqbio, q = 0.95, graphic = "expr")
+
+## MD plot 
+# if "MD", the values for the (M,D) statistics when comparing both conditions are used
+DE.plot(mynoiseqbio, q = 0.95, graphic = "MD")
+
+## Manhattan plot
+DE.plot(mynoiseqbio, chromosomes = NULL, log.scale = TRUE, join = TRUE, q = 0.95, graphic = "chrom") 
+
+DE.plot(mynoiseqbio, chromosomes = NULL, q = 0.95, graphic = "distr")
+
+DE.plot(mynoiseqbio, chromosomes = c(1,2), q = 0.95, graphic = "distr")
+```
+
+```{r Adding ENTREZ geneIds before plotting with clusterProfiler, echo=TRUE, warning=FALSE}
+#Entrez Gene IDs ("eg") is primary key 
+library("AnnotationDbi")
+library("org.Hs.eg.db")
+
+# ## List the possible values for columns
+# columns(org.Hs.eg.db)
+# ## List the possible values for keytypes
+# keytypes(org.Hs.eg.db)
+# ## get some values back
+# keys <- head(keys(org.Hs.eg.db))
+# keys
+# 
+# ## lookup gene symbol and gene type for the 1st 6 keys
+# select(org.Hs.eg.db, keys=keys, columns = c("SYMBOL","GENETYPE"))
+
+genes_list=list(mynoiseq_all, mynoiseq_down_in_mn_up_in_nn, mynoiseq_up_in_mn_down_in_nn)
+Names <- c("all_diff_genes", "down_in_mn_up_in_nn", "up_in_mn_down_in_nn")
+
+for (i in seq_along(genes_list)){
+  ens.str <- substr(rownames(genes_list[[i]]), 1, 15)
+  
+  genes_list[[i]]$'SYMBOL' <- mapIds(org.Hs.eg.db,
+                             keys=ens.str,
+                             column="SYMBOL",
+                             keytype="ENSEMBL",
+                             multiVals="first")
+  genes_list[[i]]$'ENTREZ' <- mapIds(org.Hs.eg.db,
+                             keys=ens.str,
+                             column="ENTREZID",
+                             keytype="ENSEMBL",
+                             multiVals="first")
+  }
+
+for (i in seq_along(genes_list)){
+  write.table(genes_list[[i]], paste0(Names[[i]], ".txt"), quote = FALSE, row.names = TRUE, col.names = TRUE, sep = "\t")
+}
+
+names(genes_list) <- Names
+
+```
+
+## Gene Ontology analysis 
+```{r GO, echo=TRUE, warning=FALSE}
+library("clusterProfiler")
+
+mynoiseq_all_entrez <- as.character(mynoiseq_all$ENTREZ)
+
+##Biological Process
+GO <- enrichGO(mynoiseq_all_entrez,
+               ont = "BP",
+               OrgDb="org.Hs.eg.db",
+               pvalueCutoff = 0.2,
+               keyType = "ENTREZID",
+               pAdjustMethod = "BH")
+
+dp_go <- dotplot(GO,
+        title = "GO_BP",
+        showCategory = 15)
+ggsave(dp_go, file = "enrichGO_all_diff_genes_barplot.pdf", units = "in", width = 10, height = 10)
+
+##Molecular Function
+MF <- enrichGO(mynoiseq_all_entrez,
+                       ont = "MF",
+                       OrgDb="org.Hs.eg.db",
+                       pvalueCutoff = 0.05,
+                       keyType = "ENTREZID",
+                       pAdjustMethod = "BH")
+
+dp_mf <- dotplot(MF,
+        title = "GO_MF",
+        showCategory = 15)
+dp_mf
+ggsave(dp_mf, file = "enrichGO_MF_all_diff_genes_barplot.pdf", units = "in", width = 10, height = 10)
+
+##Cellular Component
+CC <- enrichGO(mynoiseq_all_entrez,
+                          ont = "CC",
+                          OrgDb="org.Hs.eg.db",
+                          pvalueCutoff = 0.05,
+                          keyType = "ENTREZID",
+                          pAdjustMethod = "BH")
+
+dp_cc <- dotplot(CC,
+        title = "GO_CC",
+        showCategory = 15)
+dp_cc
+ggsave(dp_cc, file = "enrichGO_CC_all_diff_genes_barplot.pdf", units = "in", width = 10, height = 10)
+```
